@@ -1,0 +1,3 @@
+terminal-renderer/src/main/cpp/include/** -whitespace
+terminal-renderer/src/main/jniLibs/**/*.so binary
+terminal-renderer/src/main/assets/fonts/*.ttf binary
