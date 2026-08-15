@@ -34,7 +34,6 @@ import com.t3tools.android.protocol.reduce
 import com.t3tools.android.protocol.rekeyAtomicStartCommand
 import com.t3tools.android.protocol.startCommand
 import com.t3tools.android.protocol.withStartCommandAttachments
-import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -602,10 +601,7 @@ class OnlineChatRepository(
       threadId,
       resolveWorkspaceFilePath(cwd, relativePath),
     )
-    val base = runtime.environment.httpBaseUrl.trimEnd('/')
-    val relative = asset.relativeUrl
-    if (relative.startsWith("http://") || relative.startsWith("https://")) relative
-    else URI("$base/").resolve(relative.removePrefix("/")).toString()
+    joinAssetUrl(runtime.environment.httpBaseUrl, asset.relativeUrl)
   }
 
   suspend fun attachmentAssetUrl(environmentId: String, attachmentId: String): String =
@@ -615,10 +611,7 @@ class OnlineChatRepository(
         requireNotNull(runtime.connection).session,
         attachmentId,
       )
-      val base = runtime.environment.httpBaseUrl.trimEnd('/')
-      val relative = asset.relativeUrl
-      if (relative.startsWith("http://") || relative.startsWith("https://")) relative
-      else URI("$base/").resolve(relative.removePrefix("/")).toString()
+      joinAssetUrl(runtime.environment.httpBaseUrl, asset.relativeUrl)
     }
 
   suspend fun cleanupAttachments() = withContext(Dispatchers.IO) {
@@ -1202,6 +1195,10 @@ class OnlineChatRepository(
 
       runtime.connection = connected
       runtime.generation += 1
+      runtime.faviconJob?.cancel()
+      runtime.faviconJob = null
+      runtime.projectFavicons.clear()
+      runtime.failedFaviconUrls.clear()
       runtime.shell = runtime.shell.awaitingSynchronization()
       runtime.providerModels = parseProviderModels(connected.config)
       runtime.capabilities = connected.descriptor.capabilities.toThreadCapabilities(connected.config)
@@ -1640,7 +1637,7 @@ class OnlineChatRepository(
       selectedThreadId = active?.selectedThreadId,
       thread = active?.thread ?: ThreadState(),
       providerModels = active?.providerModels.orEmpty(),
-      projectFavicons = active?.projectFavicons?.toMap().orEmpty(),
+      projectFavicons = active?.publishedFaviconUrls().orEmpty(),
       pendingTasks = pending.values.filter { it.environmentId == activeEnvironmentId },
       threadCapabilities = active?.capabilities ?: ThreadCapabilities(),
       settings = appSettings,
@@ -1649,26 +1646,57 @@ class OnlineChatRepository(
     )
   }
 
+  fun invalidateProjectFavicon(projectId: String) {
+    synchronized(lock) {
+      val runtime = activeRuntimeLocked() ?: return
+      val record = runtime.projectFavicons[projectId] ?: return
+      val url = joinAssetUrl(record.httpBaseUrl, record.relativeUrl)
+      if (runtime.failedFaviconUrls[projectId] == url) return
+      runtime.failedFaviconUrls[projectId] = url
+      runtime.projectFavicons.remove(projectId)
+      publishLocked()
+      val session = runtime.connection?.session ?: return
+      if (runtime.shell.synchronized) {
+        resolveProjectFavicons(runtime.environment.environmentId, runtime, session)
+      }
+    }
+  }
+
   private fun resolveProjectFavicons(
     environmentId: String,
     runtime: EnvironmentRuntime,
     session: com.t3tools.android.protocol.EffectRpcSession,
   ) {
-    val unresolve = runtime.shell.projects.values.filter { it.id !in runtime.projectFavicons }
-    if (unresolve.isEmpty()) return
-    scope.launch {
-      for (project in unresolve) {
-        val rel = client.createAssetToken(session, "project-favicon", project.workspaceRoot)
-        if (rel != null && !rel.endsWith("project-favicon-missing")) {
-          val fullUrl = runtime.environment.httpBaseUrl.removeSuffix("/") + rel
-          synchronized(lock) {
-            runtime.projectFavicons[project.id] = fullUrl
-            publishLocked()
-          }
+    if (runtime.faviconJob?.isActive == true) return
+    val now = System.currentTimeMillis()
+    val httpBaseUrl = runtime.environment.httpBaseUrl
+    val targets = runtime.shell.projects.values.filter { project ->
+      val existing = runtime.projectFavicons[project.id]
+      existing == null || projectFaviconNeedsRefresh(existing, now, httpBaseUrl)
+    }
+    if (targets.isEmpty()) return
+    val generation = runtime.generation
+    runtime.faviconJob = scope.launch {
+      for (project in targets) {
+        val asset = client.createAssetToken(session, "project-favicon", project.workspaceRoot)
+        if (asset == null) continue
+        synchronized(lock) {
+          if (runtime.generation != generation) return@launch
+          runtime.projectFavicons[project.id] = ProjectFaviconRecord(
+            relativeUrl = asset.relativeUrl,
+            expiresAt = asset.expiresAt,
+            httpBaseUrl = httpBaseUrl,
+          )
+          publishLocked()
         }
       }
     }
   }
+
+  private fun EnvironmentRuntime.publishedFaviconUrls(): Map<String, String> =
+    projectFavicons.mapNotNull { (projectId, record) ->
+      publishedProjectFaviconUrl(record, failedFaviconUrls[projectId])?.let { projectId to it }
+    }.toMap()
 
   override fun close() {
     activeThreadJob?.cancel()
@@ -1692,7 +1720,9 @@ class OnlineChatRepository(
     var selectedThreadId: String? = null,
     var thread: ThreadState = ThreadState(),
     var providerModels: List<com.t3tools.android.protocol.ProviderModel> = emptyList(),
-    val projectFavicons: MutableMap<String, String> = mutableMapOf(),
+    val projectFavicons: MutableMap<String, ProjectFaviconRecord> = mutableMapOf(),
+    val failedFaviconUrls: MutableMap<String, String> = mutableMapOf(),
+    var faviconJob: Job? = null,
     var capabilities: ThreadCapabilities = ThreadCapabilities(),
     var error: String? = null,
     var connection: ConnectedEnvironment? = null,

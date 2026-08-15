@@ -94,9 +94,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
-import coil.ImageLoader
 import coil.compose.AsyncImage
-import coil.decode.SvgDecoder
+import kotlin.coroutines.cancellation.CancellationException
 import com.t3tools.android.protocol.ThreadSummary
 import java.time.Instant
 import kotlin.math.abs
@@ -165,6 +164,7 @@ fun ThreadListV2Row(
   projectPath: String?,
   providerDriver: String?,
   faviconUrl: String? = null,
+  onFaviconFailed: () -> Unit = {},
   newPinOrderKey: String? = null,
   canMovePinnedUp: Boolean = false,
   canMovePinnedDown: Boolean = false,
@@ -201,6 +201,7 @@ fun ThreadListV2Row(
           projectTitle = projectTitle,
           providerDriver = providerDriver,
           faviconUrl = faviconUrl,
+          onFaviconFailed = onFaviconFailed,
           selected = selected,
         )
       }
@@ -241,6 +242,7 @@ fun ThreadListV2Row(
           projectTitle = projectTitle,
           providerDriver = providerDriver,
           faviconUrl = faviconUrl,
+          onFaviconFailed = onFaviconFailed,
           selected = selected,
         )
       }
@@ -426,6 +428,7 @@ private fun ThreadListV2RowContent(
   projectTitle: String?,
   providerDriver: String?,
   faviconUrl: String? = null,
+  onFaviconFailed: () -> Unit = {},
   selected: Boolean = false,
 ) {
   val thread = item.thread
@@ -478,7 +481,12 @@ private fun ThreadListV2RowContent(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
       ) {
         if (project != null) {
-          ProjectFaviconMark(title = project, dimmed = true, faviconUrl = faviconUrl)
+          ProjectFaviconMark(
+            title = project,
+            dimmed = true,
+            faviconUrl = faviconUrl,
+            onLoadFailed = onFaviconFailed,
+          )
         }
         Text(
           text = thread.title,
@@ -502,7 +510,12 @@ private fun ThreadListV2RowContent(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
           if (project != null) {
-            ProjectFaviconMark(title = project, dimmed = false, faviconUrl = faviconUrl)
+            ProjectFaviconMark(
+              title = project,
+              dimmed = false,
+              faviconUrl = faviconUrl,
+              onLoadFailed = onFaviconFailed,
+            )
             Text(
               text = project,
               modifier = Modifier.weight(1f),
@@ -578,23 +591,16 @@ fun ProjectFaviconMark(
   dimmed: Boolean,
   faviconUrl: String?,
   size: Dp = 15.dp,
+  onLoadFailed: () -> Unit = {},
 ) {
-  var loadFailed by remember(faviconUrl) { mutableStateOf(false) }
-
-  if (!faviconUrl.isNullOrBlank() && !loadFailed) {
-    val context = LocalContext.current
-    val imageLoader = remember(context) {
-      ImageLoader.Builder(context)
-        .components {
-          add(SvgDecoder.Factory())
-        }
-        .build()
-    }
+  if (!faviconUrl.isNullOrBlank()) {
     AsyncImage(
       model = faviconUrl,
       contentDescription = title,
-      imageLoader = imageLoader,
-      onError = { loadFailed = true },
+      onError = { state ->
+        if (state.result.throwable is CancellationException) return@AsyncImage
+        onLoadFailed()
+      },
       modifier = Modifier
         .size(size)
         .alpha(if (dimmed) 0.4f else 1f)

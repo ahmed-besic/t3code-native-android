@@ -13,9 +13,11 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -43,6 +45,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -119,7 +122,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -167,6 +169,11 @@ import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -1029,6 +1036,7 @@ private fun DraftThreadRow(
   providerLabel: String?,
   branch: String?,
   faviconUrl: String?,
+  onFaviconFailed: () -> Unit = {},
   onResume: () -> Unit,
   onDiscard: () -> Unit,
 ) {
@@ -1075,7 +1083,12 @@ private fun DraftThreadRow(
           verticalAlignment = Alignment.CenterVertically,
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-          ProjectFaviconMark(title = project, dimmed = false, faviconUrl = faviconUrl)
+          ProjectFaviconMark(
+            title = project,
+            dimmed = false,
+            faviconUrl = faviconUrl,
+            onLoadFailed = onFaviconFailed,
+          )
           Text(
             text = project,
             style = MaterialTheme.typography.labelMedium,
@@ -1423,6 +1436,9 @@ private fun HomeScreen(
               providerLabel = activeDraftProvider ?: "Default harness",
               branch = activeDraftBranch,
               faviconUrl = activeDraftProject?.let { runtime.projectFavicons[it.id] },
+              onFaviconFailed = {
+                activeDraftProject?.id?.let(viewModel::invalidateProjectFavicon)
+              },
               onResume = onNewTask,
               onDiscard = { viewModel.discardDraft(newTaskDraftKey) },
             )
@@ -1576,6 +1592,7 @@ private fun LazyListScope.threadListRows(
         runtime.providerModels,
       ),
       faviconUrl = project?.let { runtime.projectFavicons[it.id] },
+      onFaviconFailed = { project?.id?.let(viewModel::invalidateProjectFavicon) },
       newPinOrderKey = pinOrderKeyBetween(null, firstPinKey),
       canMovePinnedUp = capabilities.pinReorder && pinnedIndex > 0,
       canMovePinnedDown = capabilities.pinReorder && pinnedIndex in 0 until orderedPinned.lastIndex,
@@ -3231,6 +3248,7 @@ private fun NewTaskDrawer(
         queuedMessageCount = 0,
         active = false,
         placeholder = project?.let { "Describe a task in ${it.title}…" } ?: "Describe a task…",
+        autoFocus = true,
         enabled = projectId.isNotBlank() && fallbackModelSelection != null &&
           (!worktree || baseBranch.isNotBlank()) && runtime.shell.sequence >= 0,
         sending = dispatchState is DispatchState.Sending,
@@ -4688,6 +4706,7 @@ private fun ChatComposerArea(
   queuedMessageCount: Int,
   active: Boolean,
   placeholder: String,
+  autoFocus: Boolean = false,
   enabled: Boolean,
   sending: Boolean,
   onDraftUpdate: (ComposerDraft) -> Unit,
@@ -4700,8 +4719,21 @@ private fun ChatComposerArea(
   var showModelMenu by remember { mutableStateOf(false) }
   var showAccessMenu by remember { mutableStateOf(false) }
   var showTraitsMenu by remember { mutableStateOf(false) }
-  var showStashSheet by remember { mutableStateOf(false) }
+  var showStashMenu by remember { mutableStateOf(false) }
+  val composerFocus = remember { FocusRequester() }
+  val keyboard = LocalSoftwareKeyboardController.current
+  LaunchedEffect(autoFocus) {
+    if (!autoFocus) return@LaunchedEffect
+    composerFocus.requestFocus()
+    keyboard?.show()
+  }
   val stashedEntries by (viewModel?.promptStashEntries ?: MutableStateFlow(emptyList())).collectAsState()
+  LaunchedEffect(stashedEntries.size, showStashMenu) {
+    if (showStashMenu && stashedEntries.isEmpty()) showStashMenu = false
+  }
+  if (showStashMenu) {
+    BackHandler { showStashMenu = false }
+  }
 
   var expandedProviderId by remember { mutableStateOf<String?>(null) }
 
@@ -4819,11 +4851,45 @@ private fun ChatComposerArea(
     Box(
       modifier = Modifier.fillMaxWidth(),
     ) {
+      androidx.compose.animation.AnimatedVisibility(
+        visible = showStashMenu,
+        modifier = Modifier
+          .align(Alignment.TopCenter)
+          .fillMaxWidth()
+          .zIndex(1f)
+          .layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints.copy(minHeight = 0))
+            layout(placeable.width, 0) {
+              placeable.placeRelative(0, -placeable.height - 8.dp.roundToPx())
+            }
+          },
+        enter = expandVertically(expandFrom = Alignment.Bottom, animationSpec = tween(180)) + fadeIn(tween(120)),
+        exit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = tween(140)) + fadeOut(tween(100)),
+      ) {
+        if (viewModel != null) {
+          StashFloatingMenu(
+            entries = stashedEntries,
+            onRestore = { entry ->
+              val item = viewModel.takeStashEntry(entry.id)
+              if (item != null) {
+                onDraftUpdate(
+                  draft.copy(
+                    text = appendStashedText(draft.text, item.text),
+                    attachments = draft.attachments + item.attachments,
+                  ),
+                )
+              }
+              showStashMenu = false
+            },
+            onDelete = { id -> viewModel.deleteStashEntry(id) },
+          )
+        }
+      }
       Surface(
         shape = composerShape,
         color = Color(0xFF141417),
         border = BorderStroke(1.dp, Color(0xFF27272A)),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().zIndex(2f),
       ) {
         Column(
           modifier = Modifier
@@ -4867,7 +4933,9 @@ private fun ChatComposerArea(
                 innerTextField()
               }
             },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+              .fillMaxWidth()
+              .focusRequester(composerFocus),
           )
 
           // Bottom action bar
@@ -5249,9 +5317,12 @@ private fun ChatComposerArea(
               }
             }
           },
-          onOpenStash = { showStashSheet = true },
+          onOpenStash = {
+            if (stashedEntries.isNotEmpty()) showStashMenu = !showStashMenu
+          },
           modifier = Modifier
             .align(Alignment.TopEnd)
+            .zIndex(3f)
             .offset(x = (-16).dp, y = (-12).dp),
         )
       }
@@ -5262,24 +5333,6 @@ private fun ChatComposerArea(
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 6.dp, top = 5.dp),
-      )
-    }
-    if (showStashSheet && viewModel != null) {
-      StashBottomSheet(
-        entries = stashedEntries,
-        onRestore = { entry ->
-          val item = viewModel.takeStashEntry(entry.id)
-          if (item != null) {
-            onDraftUpdate(
-              draft.copy(
-                text = appendStashedText(draft.text, item.text),
-                attachments = draft.attachments + item.attachments,
-              ),
-            )
-          }
-        },
-        onDelete = { id -> viewModel.deleteStashEntry(id) },
-        onDismiss = { showStashSheet = false },
       )
     }
   }
@@ -5375,94 +5428,72 @@ private fun StashButton(
 }
 
 @Composable
-private fun StashBottomSheet(
+private fun StashFloatingMenu(
   entries: List<PromptStashEntry>,
   onRestore: (PromptStashEntry) -> Unit,
   onDelete: (String) -> Unit,
-  onDismiss: () -> Unit,
 ) {
-  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
-  ModalBottomSheet(
-    onDismissRequest = onDismiss,
-    sheetState = sheetState,
-    containerColor = Color(0xFF18181B),
-    dragHandle = { BottomSheetDefaults.DragHandle(color = Color(0xFF3F3F46)) },
+  Surface(
+    shape = RoundedCornerShape(20.dp),
+    color = Color(0xFF18181B),
+    border = BorderStroke(1.dp, Color(0xFF3F3F46)),
+    tonalElevation = 6.dp,
+    shadowElevation = 12.dp,
+    modifier = Modifier.fillMaxWidth(),
   ) {
     Column(
       modifier = Modifier
         .fillMaxWidth()
-        .padding(horizontal = 16.dp, vertical = 8.dp),
+        .heightIn(max = 280.dp)
+        .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
       Text(
-        text = "Stashed Prompts",
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.Bold,
-        color = Color.White,
-        modifier = Modifier.padding(bottom = 12.dp),
+        text = "Stashed prompts",
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = Color(0xFFA1A1AA),
+        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
       )
-
-      if (entries.isEmpty()) {
-        Text(
-          text = "No stashed prompts. Flick the Stash button on the composer to stash your text.",
-          style = MaterialTheme.typography.bodyMedium,
-          color = Color(0xFFA1A1AA),
-          modifier = Modifier.padding(vertical = 16.dp),
-        )
-      } else {
-        LazyColumn(
-          modifier = Modifier.fillMaxWidth(),
-          verticalArrangement = Arrangement.spacedBy(8.dp),
-          contentPadding = PaddingValues(bottom = 24.dp),
-        ) {
-          items(entries, key = { it.id }) { entry ->
-            Surface(
-              shape = RoundedCornerShape(12.dp),
-              color = Color(0xFF27272A),
-              border = BorderStroke(1.dp, Color(0xFF3F3F46)),
-              modifier = Modifier
-                .fillMaxWidth()
-                .clickable {
-                  onRestore(entry)
-                  onDismiss()
-                },
-            ) {
-              Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-              ) {
-                Column(modifier = Modifier.weight(1f)) {
-                  Text(
-                    text = entry.text.ifBlank { "(${entry.attachments.size} image attachments)" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                  )
-                  if (entry.attachments.isNotEmpty()) {
-                    Text(
-                      text = "${entry.attachments.size} image${if (entry.attachments.size == 1) "" else "s"}",
-                      style = MaterialTheme.typography.labelSmall,
-                      color = MaterialTheme.colorScheme.primary,
-                      modifier = Modifier.padding(top = 2.dp),
-                    )
-                  }
-                }
-
-                IconButton(
-                  onClick = { onDelete(entry.id) },
-                  modifier = Modifier.size(32.dp),
-                ) {
-                  Icon(
-                    imageVector = Icons.Rounded.Delete,
-                    contentDescription = "Delete stash",
-                    tint = Color(0xFFF87171),
-                    modifier = Modifier.size(18.dp),
-                  )
-                }
+      LazyColumn(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+      ) {
+        items(entries, key = { it.id }) { entry ->
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .focusProperties { canFocus = false }
+              .clickable { onRestore(entry) }
+              .padding(horizontal = 6.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text(
+                text = entry.text.ifBlank { "(${entry.attachments.size} image attachments)" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+              if (entry.attachments.isNotEmpty()) {
+                Text(
+                  text = "${entry.attachments.size} image${if (entry.attachments.size == 1) "" else "s"}",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.primary,
+                  modifier = Modifier.padding(top = 2.dp),
+                )
               }
             }
+            Icon(
+              imageVector = Icons.Rounded.Close,
+              contentDescription = "Delete stash",
+              tint = Color(0xFFA1A1AA),
+              modifier = Modifier
+                .size(18.dp)
+                .focusProperties { canFocus = false }
+                .clickable { onDelete(entry.id) },
+            )
           }
         }
       }

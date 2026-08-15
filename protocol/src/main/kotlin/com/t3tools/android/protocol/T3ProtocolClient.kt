@@ -155,8 +155,8 @@ class T3ProtocolClient(
     session: EffectRpcSession,
     resourceTag: String,
     cwd: String,
-  ): String? = runCatching {
-    val res = session.unary(
+  ): WorkspaceAssetUrl? = runCatching {
+    session.unary(
       "assets.createUrl",
       buildJsonObject(
         "resource" to buildJsonObject(
@@ -164,8 +164,7 @@ class T3ProtocolClient(
           "cwd" to JsonPrimitive(cwd),
         ),
       ),
-    ).jsonObject
-    res["relativeUrl"]?.jsonPrimitive?.content
+    ).toWorkspaceAssetUrl()
   }.getOrNull()
 
   suspend fun browseFilesystem(

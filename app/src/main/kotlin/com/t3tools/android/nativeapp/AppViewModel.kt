@@ -1963,6 +1963,9 @@ class AppViewModel(
   fun threadAction(type: String, threadId: String, value: String? = null) =
     dispatchAction(threadActionCommand(type, threadId, value))
 
+  fun invalidateProjectFavicon(projectId: String) =
+    repository.invalidateProjectFavicon(projectId)
+
   fun renameThread(threadId: String, title: String) =
     dispatchAction(updateThreadTitleCommand(threadId = threadId, title = title))
 

@@ -4,7 +4,7 @@ This is the authoritative closeout record for the independent native Android cli
 
 ## Status
 
-- App version: `0.7.1` (`versionCode` 3).
+- App version: `0.7.2` (`versionCode` 4).
 - Application id: `com.t3tools.t3code.native.experimental`.
 - Minimum Android version: API 26; target API: 35.
 - The existing application id is retained so local app data, deep links, shortcuts, and the Clerk redirect identity remain stable.
