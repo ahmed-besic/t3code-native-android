@@ -9,7 +9,7 @@ An independent, native Kotlin and Jetpack Compose client for [T3 Code](https://g
 
 Download the signed universal APK from [GitHub Releases](https://github.com/ahmed-besic/t3code-native-android/releases). Android may ask you to allow installation from your browser or file manager.
 
-[Download v0.7.0 APK](https://github.com/ahmed-besic/t3code-native-android/releases/download/v0.7.0/t3code-native-android-v0.7.0.apk) · [SHA-256 checksum](https://github.com/ahmed-besic/t3code-native-android/releases/download/v0.7.0/t3code-native-android-v0.7.0.apk.sha256)
+[Download v0.7.1 APK](https://github.com/ahmed-besic/t3code-native-android/releases/download/v0.7.1/t3code-native-android-v0.7.1.apk) · [SHA-256 checksum](https://github.com/ahmed-besic/t3code-native-android/releases/download/v0.7.1/t3code-native-android-v0.7.1.apk.sha256)
 
 The app uses the package id `com.t3tools.t3code.native.experimental`. A release APK cannot update over a locally installed debug APK because their signing certificates differ.
 
