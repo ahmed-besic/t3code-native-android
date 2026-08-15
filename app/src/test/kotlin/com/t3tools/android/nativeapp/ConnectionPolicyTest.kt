@@ -12,8 +12,16 @@ class ConnectionPolicyTest {
   }
 
   @Test
-  fun reconnects_only_after_a_meaningful_background_period() {
+  fun always_probes_on_resume_instead_of_forcing_a_reconnect() {
+    assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(0))
     assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(9_999))
-    assertEquals(ResumeAction.Reconnect, ConnectionPolicy.resumeAction(10_000))
+    assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(10_000))
+    assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(60_000))
+  }
+
+  @Test
+  fun keeps_a_synchronized_shell_across_reconnect() {
+    assertEquals(true, ConnectionPolicy.preserveShellOnReconnect(true))
+    assertEquals(false, ConnectionPolicy.preserveShellOnReconnect(false))
   }
 }

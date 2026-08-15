@@ -146,9 +146,6 @@ fun TerminalScreen(
   LaunchedEffect(keyboardVisible) {
     if (keyboardVisible) accessoryDismissed = false
   }
-  LaunchedEffect(targetKey, surface, state.status) {
-    if (state.status == TerminalStatus.Running) surface?.requestKeyboardFocus()
-  }
   DisposableEffect(targetKey) {
     onDispose { viewModel.stopTerminalRoute(targetKey) }
   }
@@ -224,59 +221,62 @@ fun TerminalScreen(
         if (connectionPhase != ConnectionPhase.Connected) {
           TerminalConnectionNotice(connectionPhase, viewModel::retryConnection)
         }
-        AndroidView(
-          factory = { context ->
-            TerminalSurfaceView(context).apply {
-              terminalKey = targetKey
-              backgroundColorHex = TERMINAL_BACKGROUND
-              foregroundColorHex = TERMINAL_FOREGROUND
-              this.fontSize = fontSize
-              onInput = handleInput
-              onResize = viewModel::resizeTerminal
-              reset(viewModel.terminalReplayBuffer(targetKey))
-              autoFocus = true
-              surface = this
-            }
-          },
-          update = { terminal ->
-            if (terminal.terminalKey != targetKey) {
-              terminal.terminalKey = targetKey
-              terminal.reset(viewModel.terminalReplayBuffer(targetKey))
-            }
-            terminal.fontSize = fontSize
-            terminal.onInput = handleInput
-            terminal.onResize = viewModel::resizeTerminal
-            if (surface !== terminal) surface = terminal
-          },
-          onRelease = { terminal ->
-            if (surface === terminal) surface = null
-            terminal.cleanup()
-          },
-          modifier = Modifier.fillMaxWidth().weight(1f).background(Color(0xFF09090B)),
-        )
-        if (keyboardVisible && !accessoryDismissed) {
-          TerminalAccessoryBar(
-            actions = toolbarActions,
-            pendingModifier = pendingModifier,
-            onAction = { action ->
-              when (action) {
-                is TerminalToolbarAction.Modifier -> {
-                  pendingModifier = if (pendingModifier == action.modifier) null else action.modifier
-                }
-                TerminalToolbarAction.Clear -> {
-                  pendingModifier = null
-                  viewModel.clearTerminal()
-                }
-                is TerminalToolbarAction.Send -> {
-                  handleInput(action.data)
-                }
+        Box(Modifier.fillMaxWidth().weight(1f).background(Color(0xFF09090B))) {
+          AndroidView(
+            factory = { context ->
+              TerminalSurfaceView(context).apply {
+                terminalKey = targetKey
+                backgroundColorHex = TERMINAL_BACKGROUND
+                foregroundColorHex = TERMINAL_FOREGROUND
+                this.fontSize = fontSize
+                onInput = handleInput
+                onResize = viewModel::resizeTerminal
+                reset(viewModel.terminalReplayBuffer(targetKey))
+                autoFocus = false
+                surface = this
               }
             },
-            onDismissKeyboard = {
-              accessoryDismissed = true
-              surface?.dismissKeyboard()
+            update = { terminal ->
+              if (terminal.terminalKey != targetKey) {
+                terminal.terminalKey = targetKey
+                terminal.reset(viewModel.terminalReplayBuffer(targetKey))
+              }
+              terminal.fontSize = fontSize
+              terminal.onInput = handleInput
+              terminal.onResize = viewModel::resizeTerminal
+              if (surface !== terminal) surface = terminal
             },
+            onRelease = { terminal ->
+              if (surface === terminal) surface = null
+              terminal.cleanup()
+            },
+            modifier = Modifier.fillMaxSize(),
           )
+          if (keyboardVisible && !accessoryDismissed) {
+            TerminalAccessoryBar(
+              actions = toolbarActions,
+              pendingModifier = pendingModifier,
+              onAction = { action ->
+                when (action) {
+                  is TerminalToolbarAction.Modifier -> {
+                    pendingModifier = if (pendingModifier == action.modifier) null else action.modifier
+                  }
+                  TerminalToolbarAction.Clear -> {
+                    pendingModifier = null
+                    viewModel.clearTerminal()
+                  }
+                  is TerminalToolbarAction.Send -> {
+                    handleInput(action.data)
+                  }
+                }
+              },
+              onDismissKeyboard = {
+                accessoryDismissed = true
+                surface?.dismissKeyboard()
+              },
+              modifier = Modifier.align(Alignment.BottomCenter),
+            )
+          }
         }
       }
 
@@ -569,11 +569,12 @@ private fun TerminalAccessoryBar(
   pendingModifier: PendingTerminalModifier?,
   onAction: (TerminalToolbarAction) -> Unit,
   onDismissKeyboard: () -> Unit,
+  modifier: Modifier = Modifier,
 ) {
   Surface(
     color = Color(0xFF09090B),
     border = BorderStroke(1.dp, Color(0xFF27272A)),
-    modifier = Modifier.fillMaxWidth().height(52.dp),
+    modifier = modifier.fillMaxWidth().height(52.dp),
   ) {
     Row(
       modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 4.dp),

@@ -831,7 +831,8 @@ class OnlineChatRepository(
     data: String,
   ) = withContext(Dispatchers.IO) {
     val runtime = connectedRuntime(environmentId)
-    client.writeTerminal(requireNotNull(runtime.connection).session, threadId, terminalId, data)
+    val session = runtime.connection?.session ?: error("Environment is disconnected.")
+    client.writeTerminal(session, threadId, terminalId, data)
   }
 
   suspend fun resizeTerminal(
@@ -842,8 +843,9 @@ class OnlineChatRepository(
     rows: Int,
   ) = withContext(Dispatchers.IO) {
     val runtime = connectedRuntime(environmentId)
+    val session = runtime.connection?.session ?: error("Environment is disconnected.")
     client.resizeTerminal(
-      requireNotNull(runtime.connection).session,
+      session,
       threadId,
       terminalId,
       cols,
@@ -1156,20 +1158,25 @@ class OnlineChatRepository(
   ) {
     var supplied = initialConnection
     var attempt = 0
+    var keepLastShell = false
     while (true) {
       val runtime = synchronized(lock) { runtimes[environmentId] } ?: return
       if (!runtime.environment.desired) return
       if (connectivity.status.value == ConnectivityStatus.Offline) {
+        keepLastShell = false
         updateConnection(runtime, ConnectionPhase.Offline, null)
         if (signal.receive() == SupervisorSignal.Stop) return
         continue
       }
-      updateConnection(runtime, ConnectionPhase.Connecting, null)
+      if (!keepLastShell) {
+        updateConnection(runtime, ConnectionPhase.Connecting, null)
+      }
       val connectedAt = System.currentTimeMillis()
       val connected = try {
         supplied?.also { supplied = null } ?: openConnection(runtime.environment)
       } catch (error: Throwable) {
         if (error is CancellationException) throw error
+        keepLastShell = false
         val blocked = OutboxPolicy.isBlockedConnection(error)
         updateConnection(
           runtime,
@@ -1199,14 +1206,18 @@ class OnlineChatRepository(
       runtime.faviconJob = null
       runtime.projectFavicons.clear()
       runtime.failedFaviconUrls.clear()
-      runtime.shell = runtime.shell.awaitingSynchronization()
+      if (!keepLastShell) {
+        runtime.shell = runtime.shell.awaitingSynchronization()
+        runtime.shellSyncPhase = SyncPhase.Synchronizing
+      } else if (runtime.shell.synchronized) {
+        runtime.shellSyncPhase = SyncPhase.Synchronized
+      }
       runtime.providerModels = parseProviderModels(connected.config)
       runtime.capabilities = connected.descriptor.capabilities.toThreadCapabilities(connected.config)
       database.saveServerConfig(
         environmentId,
         CachedServerConfig(connected.config, connected.descriptor.capabilities),
       )
-      runtime.shellSyncPhase = SyncPhase.Synchronizing
       updateConnection(runtime, ConnectionPhase.Connected, null)
       val generation = runtime.generation
       val shellJob = scope.launch {
@@ -1287,6 +1298,7 @@ class OnlineChatRepository(
       shellJob.cancel()
       closeJob.cancel()
       connected.session.abort()
+      keepLastShell = ConnectionPolicy.preserveShellOnReconnect(runtime.shell.synchronized)
       runtime.connection = null
       if (System.currentTimeMillis() - connectedAt >= ConnectionPolicy.STABLE_LEASE_MS) attempt = 0
       if (connectivity.status.value == ConnectivityStatus.Offline) {
