@@ -142,6 +142,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -3184,6 +3185,10 @@ private fun NewTaskDrawer(
     }
 
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  var composerReady by remember { mutableStateOf(false) }
+  LaunchedEffect(sheetState.currentValue) {
+    if (sheetState.currentValue == SheetValue.Expanded) composerReady = true
+  }
   ModalBottomSheet(
     onDismissRequest = onDismiss,
     sheetState = sheetState,
@@ -3248,7 +3253,8 @@ private fun NewTaskDrawer(
         queuedMessageCount = 0,
         active = false,
         placeholder = project?.let { "Describe a task in ${it.title}…" } ?: "Describe a task…",
-        autoFocus = true,
+        autoFocus = composerReady,
+        stashInline = true,
         enabled = projectId.isNotBlank() && fallbackModelSelection != null &&
           (!worktree || baseBranch.isNotBlank()) && runtime.shell.sequence >= 0,
         sending = dispatchState is DispatchState.Sending,
@@ -3885,21 +3891,33 @@ private fun ThreadFeed(
                     }
                   }
                 } else {
-                  Column(horizontalAlignment = Alignment.End) {
+                  BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val maxBubble = maxWidth * 0.86f
+                    val pinWidth = remember(message.text) {
+                      parseReviewMessageSegments(message.text).any { it is ReviewMessageSegment.Comment } ||
+                        hasWideMarkdownBlock(message.text)
+                    }
+                    Column(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalAlignment = Alignment.End,
+                    ) {
                     Surface(
                       shape = RoundedCornerShape(16.dp),
                       color = if (message.role == "user") Color(0xFF172554) else MaterialTheme.colorScheme.surface,
-                      modifier = Modifier.fillMaxWidth(),
+                      modifier = Modifier
+                        .widthIn(max = maxBubble)
+                        .then(if (pinWidth) Modifier.fillMaxWidth() else Modifier),
                     ) {
                       Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (message.text.isNotBlank()) {
-                          SelectionContainer { UserMessageContent(message.text) }
+                          UserMessageContent(message.text, fillWidth = pinWidth)
                         }
                         message.attachments.forEach { SentAttachmentImage(environmentId, it, viewModel) }
                       }
                     }
                     if (message.role == "user" && message.text.isNotBlank()) {
                       MessageCopyButton(message.text)
+                    }
                     }
                   }
                 }
@@ -4340,14 +4358,17 @@ private fun MessageCopyButton(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun UserMessageContent(text: String, modifier: Modifier = Modifier) {
+private fun UserMessageContent(
+  text: String,
+  fillWidth: Boolean,
+  modifier: Modifier = Modifier,
+) {
   val segments = remember(text) { parseReviewMessageSegments(text) }
-  val sizes = resolveMarkdownFontSizes(LocalT3Appearance.current.baseFontSize)
   Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
     segments.forEach { segment ->
       when (segment) {
         is ReviewMessageSegment.Text -> segment.value.trim().takeIf(String::isNotEmpty)?.let {
-          Text(it, fontSize = sizes.body.sp, lineHeight = sizes.bodyLineHeight.sp)
+          T3Markdown(markdown = it, streaming = false, fillWidth = fillWidth)
         }
         is ReviewMessageSegment.Comment -> ReviewCommentCard(segment.value)
       }
@@ -4707,6 +4728,7 @@ private fun ChatComposerArea(
   active: Boolean,
   placeholder: String,
   autoFocus: Boolean = false,
+  stashInline: Boolean = false,
   enabled: Boolean,
   sending: Boolean,
   onDraftUpdate: (ComposerDraft) -> Unit,
@@ -4848,42 +4870,60 @@ private fun ChatComposerArea(
       }
     }
     val composerShape = RoundedCornerShape(20.dp)
+    val stashEnter = expandVertically(expandFrom = Alignment.Bottom, animationSpec = tween(180)) + fadeIn(tween(120))
+    val stashExit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = tween(140)) + fadeOut(tween(100))
+    val stashMenu: @Composable () -> Unit = {
+      if (viewModel != null) {
+        StashFloatingMenu(
+          entries = stashedEntries,
+          onRestore = { entry ->
+            val item = viewModel.takeStashEntry(entry.id)
+            if (item != null) {
+              onDraftUpdate(
+                draft.copy(
+                  text = appendStashedText(draft.text, item.text),
+                  attachments = draft.attachments + item.attachments,
+                ),
+              )
+            }
+            showStashMenu = false
+          },
+          onDelete = { id -> viewModel.deleteStashEntry(id) },
+        )
+      }
+    }
+    Column(Modifier.fillMaxWidth()) {
+      if (stashInline) {
+        androidx.compose.animation.AnimatedVisibility(
+          visible = showStashMenu,
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp),
+          enter = stashEnter,
+          exit = stashExit,
+          content = { stashMenu() },
+        )
+      }
     Box(
       modifier = Modifier.fillMaxWidth(),
     ) {
-      androidx.compose.animation.AnimatedVisibility(
-        visible = showStashMenu,
-        modifier = Modifier
-          .align(Alignment.TopCenter)
-          .fillMaxWidth()
-          .zIndex(1f)
-          .layout { measurable, constraints ->
-            val placeable = measurable.measure(constraints.copy(minHeight = 0))
-            layout(placeable.width, 0) {
-              placeable.placeRelative(0, -placeable.height - 8.dp.roundToPx())
-            }
-          },
-        enter = expandVertically(expandFrom = Alignment.Bottom, animationSpec = tween(180)) + fadeIn(tween(120)),
-        exit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = tween(140)) + fadeOut(tween(100)),
-      ) {
-        if (viewModel != null) {
-          StashFloatingMenu(
-            entries = stashedEntries,
-            onRestore = { entry ->
-              val item = viewModel.takeStashEntry(entry.id)
-              if (item != null) {
-                onDraftUpdate(
-                  draft.copy(
-                    text = appendStashedText(draft.text, item.text),
-                    attachments = draft.attachments + item.attachments,
-                  ),
-                )
+      if (!stashInline) {
+        androidx.compose.animation.AnimatedVisibility(
+          visible = showStashMenu,
+          modifier = Modifier
+            .align(Alignment.TopCenter)
+            .fillMaxWidth()
+            .zIndex(1f)
+            .layout { measurable, constraints ->
+              val placeable = measurable.measure(constraints.copy(minHeight = 0))
+              layout(placeable.width, 0) {
+                placeable.placeRelative(0, -placeable.height - 8.dp.roundToPx())
               }
-              showStashMenu = false
             },
-            onDelete = { id -> viewModel.deleteStashEntry(id) },
-          )
-        }
+          enter = stashEnter,
+          exit = stashExit,
+          content = { stashMenu() },
+        )
       }
       Surface(
         shape = composerShape,
@@ -5334,6 +5374,7 @@ private fun ChatComposerArea(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 6.dp, top = 5.dp),
       )
+    }
     }
   }
 }
