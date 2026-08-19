@@ -46,14 +46,120 @@ private fun JsonArray.failureMessage(): String = firstNotNullOfOrNull { cause ->
     }
 } ?: "The server rejected this request."
 
+private const val REQUEST_ID_FIELD = "\"requestId\""
+private const val TERMINAL_HISTORY_FIELD = "\"history\""
+private const val MAX_ENVELOPE_PREFIX_CHARACTERS = 1_024
+private val TERMINAL_SNAPSHOT_METHODS = setOf("terminal.attach", "terminal.open", "terminal.restart")
+
+internal fun trimTerminalHistoryInRpcMessage(
+  message: String,
+  maxHistoryCharacters: Int = DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
+): String {
+  if (message.length <= maxHistoryCharacters) return message
+  var searchFrom = 0
+  while (true) {
+    val fieldStart = message.indexOf(TERMINAL_HISTORY_FIELD, searchFrom)
+    if (fieldStart < 0) return message
+    searchFrom = fieldStart + TERMINAL_HISTORY_FIELD.length
+    if (message.isEscapedAt(fieldStart)) continue
+
+    var valueStart = searchFrom
+    while (valueStart < message.length && message[valueStart].isWhitespace()) valueStart += 1
+    if (message.getOrNull(valueStart) != ':') continue
+    valueStart += 1
+    while (valueStart < message.length && message[valueStart].isWhitespace()) valueStart += 1
+    if (message.getOrNull(valueStart) != '"') continue
+    valueStart += 1
+
+    val valueEnd = message.jsonStringEnd(valueStart) ?: return message
+    if (valueEnd - valueStart <= maxHistoryCharacters) {
+      searchFrom = valueEnd + 1
+      continue
+    }
+    val retainedStart = message.jsonStringTokenStart(
+      valueStart,
+      valueEnd - maxHistoryCharacters.coerceAtLeast(0),
+      valueEnd,
+    )
+    return buildString(message.length - retainedStart + valueStart) {
+      append(message, 0, valueStart)
+      append(message, retainedStart, message.length)
+    }
+  }
+}
+
+private fun String.isEscapedAt(index: Int): Boolean {
+  var backslashes = 0
+  var cursor = index - 1
+  while (cursor >= 0 && this[cursor] == '\\') {
+    backslashes += 1
+    cursor -= 1
+  }
+  return backslashes % 2 == 1
+}
+
+private fun String.jsonStringEnd(start: Int): Int? {
+  var cursor = start
+  while (cursor < length) {
+    when (this[cursor]) {
+      '"' -> return cursor
+      '\\' -> cursor = jsonStringTokenEnd(cursor, length)
+      else -> cursor += if (
+        this[cursor].isHighSurrogate() && getOrNull(cursor + 1)?.isLowSurrogate() == true
+      ) 2 else 1
+    }
+  }
+  return null
+}
+
+private fun String.jsonStringTokenStart(start: Int, target: Int, end: Int): Int {
+  var cursor = start
+  while (cursor < target) cursor = jsonStringTokenEnd(cursor, end)
+  return cursor
+}
+
+private fun String.jsonStringTokenEnd(start: Int, end: Int): Int {
+  if (this[start] == '\\') {
+    val escapedCharacters = if (getOrNull(start + 1) == 'u') 6 else 2
+    return (start + escapedCharacters).coerceAtMost(end)
+  }
+  return if (this[start].isHighSurrogate() && getOrNull(start + 1)?.isLowSurrogate() == true) {
+    (start + 2).coerceAtMost(end)
+  } else {
+    start + 1
+  }
+}
+
+private fun rpcEnvelopeRequestId(message: String): Long? {
+  val fieldStart = message.indexOf(REQUEST_ID_FIELD)
+  if (fieldStart !in 0..MAX_ENVELOPE_PREFIX_CHARACTERS) return null
+  var valueStart = fieldStart + REQUEST_ID_FIELD.length
+  while (valueStart < message.length && message[valueStart].isWhitespace()) valueStart += 1
+  if (message.getOrNull(valueStart) != ':') return null
+  valueStart += 1
+  while (valueStart < message.length && message[valueStart].isWhitespace()) valueStart += 1
+  var valueEnd = valueStart
+  while (message.getOrNull(valueEnd)?.isDigit() == true) valueEnd += 1
+  return message.substring(valueStart, valueEnd).toLongOrNull()
+}
+
 class EffectRpcSession private constructor(
   private val http: OkHttpClient,
   private val json: Json,
   private val keepAliveIntervalMillis: Long,
 ) : AutoCloseable {
   private sealed interface Pending {
-    class Unary(val result: CompletableDeferred<JsonElement>) : Pending
-    class Stream(val values: Channel<JsonElement>) : Pending
+    val method: String
+
+    class Unary(
+      override val method: String,
+      val result: CompletableDeferred<JsonElement>,
+    ) : Pending
+
+    class Stream(
+      override val method: String,
+      val values: Channel<JsonElement>,
+    ) : Pending
   }
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -71,7 +177,7 @@ class EffectRpcSession private constructor(
     }
 
     override fun onMessage(webSocket: WebSocket, text: String) {
-      runCatching { handle(json.parseToJsonElement(text).jsonObject) }
+      runCatching { handle(json.parseToJsonElement(prepareIncomingMessage(text)).jsonObject) }
         .onFailure { failProtocol(it) }
     }
 
@@ -93,7 +199,7 @@ class EffectRpcSession private constructor(
   suspend fun unary(tag: String, payload: JsonElement = JsonObject(emptyMap())): JsonElement {
     val id = requestIds.incrementAndGet()
     val result = CompletableDeferred<JsonElement>()
-    pending[id] = Pending.Unary(result)
+    pending[id] = Pending.Unary(tag, result)
     sendRequest(id, tag, payload)
     return try {
       result.await()
@@ -105,7 +211,7 @@ class EffectRpcSession private constructor(
   fun stream(tag: String, payload: JsonElement = JsonObject(emptyMap())): Flow<JsonElement> = flow {
     val id = requestIds.incrementAndGet()
     val values = Channel<JsonElement>(Channel.UNLIMITED)
-    pending[id] = Pending.Stream(values)
+    pending[id] = Pending.Stream(tag, values)
     sendRequest(id, tag, payload)
     try {
       for (value in values) emit(value)
@@ -140,6 +246,15 @@ class EffectRpcSession private constructor(
         ),
       ),
     )
+  }
+
+  private fun prepareIncomingMessage(message: String): String {
+    val method = rpcEnvelopeRequestId(message)?.let(pending::get)?.method ?: return message
+    return if (method in TERMINAL_SNAPSHOT_METHODS) {
+      trimTerminalHistoryInRpcMessage(message)
+    } else {
+      message
+    }
   }
 
   private fun sendInterrupt(id: Long) {

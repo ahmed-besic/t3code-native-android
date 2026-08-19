@@ -587,7 +587,19 @@ fun T3NativeApp(viewModel: AppViewModel) {
         gitState = gitState,
         onBack = {
           viewModel.clearSelectedThread()
-          navController.popBackStack()
+          if (!navController.popBackStack()) {
+            navController.navigate(HOME) {
+              popUpTo(0)
+              launchSingleTop = true
+            }
+          }
+        },
+        onMissingThread = {
+          viewModel.clearSelectedThread()
+          navController.navigate(HOME) {
+            popUpTo(0)
+            launchSingleTop = true
+          }
         },
         onFiles = { navController.navigate("thread/$threadId/files") },
         onGit = { gitDrawerThreadId = threadId },
@@ -3597,18 +3609,21 @@ private fun ThreadScreen(
   viewModel: AppViewModel,
   gitState: GitUiState,
   onBack: () -> Unit,
+  onMissingThread: () -> Unit,
   onFiles: () -> Unit,
   onGit: () -> Unit,
   onTerminal: () -> Unit,
   wideContent: Boolean = false,
 ) {
   val liveDetail = runtime.thread.detail
+  val activeThread = runtime.shell.threads[threadId]
+  val threadMissing = runtime.shell.synchronized && activeThread == null
   var leaving by remember(threadId) { mutableStateOf(false) }
   var retainedDetail by remember(threadId) { mutableStateOf(liveDetail) }
   LaunchedEffect(liveDetail) {
     if (liveDetail != null) retainedDetail = liveDetail
   }
-  val detail = liveDetail ?: retainedDetail.takeIf { leaving }
+  val detail = if (threadMissing) null else liveDetail ?: retainedDetail.takeIf { leaving }
   val leaveThread = {
     if (!leaving) {
       leaving = true
@@ -3632,7 +3647,6 @@ private fun ThreadScreen(
   var draft by remember(draftKey) { mutableStateOf(viewModel.loadDraft(draftKey)) }
   LaunchedEffect(draftRevision, draftKey) { draft = viewModel.loadDraft(draftKey) }
 
-  val activeThread = runtime.shell.threads[threadId]
   val titleText = activeThread?.title ?: detail?.summary?.title ?: "Thread"
   val branchName = gitState.status?.refName ?: activeThread?.branch ?: "main"
   val envLabel = environment.label
@@ -3709,7 +3723,14 @@ private fun ThreadScreen(
       Box(contentModifier) {
         if (detail == null) {
           Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(runtime.error ?: "Opening thread…")
+            if (threadMissing) {
+              Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("This thread no longer exists.")
+                TextButton(onClick = onMissingThread) { Text("Back to threads") }
+              }
+            } else {
+              Text(runtime.error ?: "Opening thread…")
+            }
           }
         } else {
           SubcomposeLayout(Modifier.fillMaxSize()) { constraints ->
@@ -5331,7 +5352,7 @@ private fun ChatComposerArea(
         }
       }
       contextWindowUsage?.let { usage ->
-        Box(Modifier.matchParentSize()) {
+        Box(Modifier.matchParentSize().zIndex(2.5f)) {
           ContextWindowMeter(
             usage = usage,
             modifier = Modifier

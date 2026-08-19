@@ -1689,19 +1689,21 @@ class OnlineChatRepository(
     if (targets.isEmpty()) return
     val generation = runtime.generation
     runtime.faviconJob = scope.launch {
-      for (project in targets) {
-        val asset = client.createAssetToken(session, "project-favicon", project.workspaceRoot)
-        if (asset == null) continue
-        synchronized(lock) {
-          if (runtime.generation != generation) return@launch
-          runtime.projectFavicons[project.id] = ProjectFaviconRecord(
-            relativeUrl = asset.relativeUrl,
-            expiresAt = asset.expiresAt,
-            httpBaseUrl = httpBaseUrl,
-          )
-          publishLocked()
+      targets.map { project ->
+        async {
+          val asset = client.createAssetToken(session, "project-favicon", project.workspaceRoot)
+            ?: return@async
+          synchronized(lock) {
+            if (runtime.generation != generation) return@synchronized
+            runtime.projectFavicons[project.id] = ProjectFaviconRecord(
+              relativeUrl = asset.relativeUrl,
+              expiresAt = asset.expiresAt,
+              httpBaseUrl = httpBaseUrl,
+            )
+            publishLocked()
+          }
         }
-      }
+      }.awaitAll()
     }
   }
 

@@ -12,11 +12,11 @@ class ConnectionPolicyTest {
   }
 
   @Test
-  fun always_probes_on_resume_instead_of_forcing_a_reconnect() {
+  fun reconnects_only_after_a_meaningful_background_period() {
     assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(0))
     assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(9_999))
-    assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(10_000))
-    assertEquals(ResumeAction.Probe, ConnectionPolicy.resumeAction(60_000))
+    assertEquals(ResumeAction.Reconnect, ConnectionPolicy.resumeAction(10_000))
+    assertEquals(ResumeAction.Reconnect, ConnectionPolicy.resumeAction(60_000))
   }
 
   @Test

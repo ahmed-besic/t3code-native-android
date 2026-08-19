@@ -2,24 +2,27 @@ package expo.modules.t3terminal
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Typeface
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.KeyEvent
-import android.view.View
 import android.view.ViewGroup
-import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
 import android.widget.FrameLayout
+import kotlin.math.max
 
 class TerminalSurfaceView(context: Context) : FrameLayout(context) {
   private val terminalCanvas = TerminalCanvasView(context)
-  private val inputView = TerminalKeyInputView(context)
+  private val inputView = EditText(context)
   private val resizeSettle = Runnable { applyResize() }
   private var terminalHandle = 0L
   private var fedBuffer = ""
   private var cols = 0
   private var rows = 0
+  private var clearingInput = false
   private var hasPublishedSize = false
   private var isCleanedUp = false
   private var backgroundColorValue = Color.parseColor("#24292E")
@@ -51,6 +54,7 @@ class TerminalSurfaceView(context: Context) : FrameLayout(context) {
       if (field == value) return
       field = value
       terminalCanvas.fontSizeSp = value
+      inputView.textSize = max(value, 13f)
       emitResize()
     }
 
@@ -195,7 +199,7 @@ class TerminalSurfaceView(context: Context) : FrameLayout(context) {
     if (isCleanedUp) return
     isCleanedUp = true
     removeCallbacks(resizeSettle)
-    inputView.setOnKeyListener(null)
+    inputView.setOnEditorActionListener(null)
     terminalCanvas.onScrollRows = null
     terminalCanvas.onRequestKeyboard = null
     terminalCanvas.onCellMetricsChanged = null
@@ -206,8 +210,34 @@ class TerminalSurfaceView(context: Context) : FrameLayout(context) {
   }
 
   private fun configureInputView() {
-    inputView.isFocusable = true
+    inputView.setSingleLine(true)
+    inputView.setTextColor(Color.TRANSPARENT)
+    inputView.setHintTextColor(Color.TRANSPARENT)
+    inputView.setBackgroundColor(Color.TRANSPARENT)
+    inputView.typeface = Typeface.MONOSPACE
+    inputView.textSize = max(fontSize, 13f)
+    inputView.alpha = 0.01f
     inputView.isFocusableInTouchMode = true
+    inputView.imeOptions = EditorInfo.IME_ACTION_SEND or
+      EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+      EditorInfo.IME_FLAG_NO_FULLSCREEN or
+      EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+    inputView.inputType = InputType.TYPE_CLASS_TEXT or
+      InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+      InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+    inputView.setPadding(0, 0, 0, 0)
+    inputView.setOnEditorActionListener { _, actionId, event ->
+      val isKeyUp = event?.action == KeyEvent.ACTION_UP
+      val isImeSend = actionId == EditorInfo.IME_ACTION_SEND && !isKeyUp
+      val isHardwareEnter = event?.keyCode == KeyEvent.KEYCODE_ENTER &&
+        event.action == KeyEvent.ACTION_DOWN
+      if (isImeSend || isHardwareEnter) {
+        emitKeys("\r")
+        true
+      } else {
+        false
+      }
+    }
     inputView.setOnKeyListener { _, keyCode, event ->
       if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
       when {
@@ -226,6 +256,25 @@ class TerminalSurfaceView(context: Context) : FrameLayout(context) {
         else -> false
       }
     }
+    inputView.addTextChangedListener(
+      object : TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+          if (clearingInput || s == null || count <= 0) return
+          val end = (start + count).coerceAtMost(s.length)
+          if (start >= end) return
+          emitKeys(s.subSequence(start, end).toString())
+        }
+
+        override fun afterTextChanged(editable: Editable?) {
+          if (clearingInput || editable.isNullOrEmpty()) return
+          clearingInput = true
+          editable.clear()
+          clearingInput = false
+        }
+      },
+    )
   }
 
   private fun emitKeys(data: String) {
@@ -350,64 +399,6 @@ class TerminalSurfaceView(context: Context) : FrameLayout(context) {
         paletteColors,
       )
       renderSnapshot()
-    }
-  }
-
-  private inner class TerminalKeyInputView(context: Context) : View(context) {
-    override fun onCheckIsTextEditor() = true
-
-    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-      outAttrs.inputType = InputType.TYPE_NULL
-      outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-        EditorInfo.IME_FLAG_NO_FULLSCREEN or
-        EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
-        EditorInfo.IME_ACTION_NONE
-      return TerminalInputConnection(this)
-    }
-  }
-
-  private inner class TerminalInputConnection(target: View) : BaseInputConnection(target, false) {
-    override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-      text?.toString()?.let(::emitKeys)
-      return true
-    }
-
-    override fun setComposingText(text: CharSequence?, newCursorPosition: Int) = true
-
-    override fun finishComposingText() = true
-
-    override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-      if (beforeLength > 0) emitKeys("\u007F")
-      return true
-    }
-
-    override fun performEditorAction(editorAction: Int): Boolean {
-      emitKeys("\r")
-      return true
-    }
-
-    override fun sendKeyEvent(event: KeyEvent): Boolean {
-      if (event.action != KeyEvent.ACTION_DOWN) return true
-      when (event.keyCode) {
-        KeyEvent.KEYCODE_DEL -> emitKeys("\u007F")
-        KeyEvent.KEYCODE_ENTER -> emitKeys("\r")
-        KeyEvent.KEYCODE_TAB -> emitKeys("\t")
-        KeyEvent.KEYCODE_DPAD_UP -> emitKeys("\u001b[A")
-        KeyEvent.KEYCODE_DPAD_DOWN -> emitKeys("\u001b[B")
-        KeyEvent.KEYCODE_DPAD_RIGHT -> emitKeys("\u001b[C")
-        KeyEvent.KEYCODE_DPAD_LEFT -> emitKeys("\u001b[D")
-        KeyEvent.KEYCODE_ESCAPE -> emitKeys("\u001b")
-        else -> {
-          if (event.isCtrlPressed && event.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
-            emitKeys((event.keyCode - KeyEvent.KEYCODE_A + 1).toChar().toString())
-          } else {
-            val unicode = event.unicodeChar
-            if (unicode != 0) emitKeys(unicode.toChar().toString())
-            else return super.sendKeyEvent(event)
-          }
-        }
-      }
-      return true
     }
   }
 

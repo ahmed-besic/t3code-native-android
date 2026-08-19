@@ -581,7 +581,6 @@ internal class TerminalCanvasView(context: Context) : View(context) {
     override fun onDown(event: MotionEvent): Boolean {
       scroller.forceFinished(true)
       removeCallbacks(flingRunnable)
-      onRequestKeyboard?.invoke()
       return true
     }
 
@@ -590,6 +589,7 @@ internal class TerminalCanvasView(context: Context) : View(context) {
         clearSelection()
       } else {
         performClick()
+        onRequestKeyboard?.invoke()
       }
       return true
     }

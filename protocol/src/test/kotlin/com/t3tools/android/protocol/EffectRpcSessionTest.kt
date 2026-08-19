@@ -12,6 +12,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -79,6 +80,50 @@ class EffectRpcSessionTest {
     } finally {
       server.shutdown()
     }
+  }
+
+  @Test
+  fun trims_oversized_terminal_history_before_decoding_the_rpc_frame() = runBlocking {
+    val history = "discard-${"x".repeat(600 * 1024)}-tail"
+    val server = webSocketServer(LinkedBlockingQueue()) { socket, message ->
+      if (message["_tag"] == JsonPrimitive("Request")) {
+        socket.send(
+          """{"_tag":"Chunk","requestId":${message["id"]},"values":[{"type":"snapshot","snapshot":{"history":${json.encodeToString(JsonPrimitive.serializer(), JsonPrimitive(history))}}}]}""",
+        )
+      }
+    }
+    try {
+      val session = EffectRpcSession.connect(
+        OkHttpClient(),
+        server.url("/ws").toString().replace("http://", "ws://"),
+        keepAliveIntervalMillis = 60_000,
+      )
+
+      val item = session.stream("terminal.attach").first()
+      val receivedHistory = item.jsonObject["snapshot"]!!.jsonObject["history"]!!.jsonPrimitive.content
+
+      assertEquals(512 * 1024, receivedHistory.length)
+      assertTrue(receivedHistory.endsWith("-tail"))
+      assertTrue(!receivedHistory.startsWith("discard-"))
+      session.close()
+    } finally {
+      server.shutdown()
+    }
+  }
+
+  @Test
+  fun preserves_json_escape_boundaries_while_trimming_terminal_history() {
+    val tail = "\u001b[31m\"tail\\🙂"
+    val history = "discard-${"x".repeat(40)}$tail"
+    val encodedHistory = json.encodeToString(JsonPrimitive.serializer(), JsonPrimitive(history))
+    val message = """{"snapshot":{"history":$encodedHistory}}"""
+
+    val trimmed = trimTerminalHistoryInRpcMessage(message, maxHistoryCharacters = 24)
+    val decoded = json.parseToJsonElement(trimmed).jsonObject["snapshot"]!!
+      .jsonObject["history"]!!.jsonPrimitive.content
+
+    assertTrue(decoded.endsWith(tail))
+    assertTrue(!decoded.startsWith("discard-"))
   }
 
   private fun webSocketServer(
